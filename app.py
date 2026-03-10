@@ -1,3 +1,4 @@
+import re
 import streamlit as st
 import feedparser
 from datetime import datetime, timezone
@@ -97,11 +98,32 @@ html, body, [class*="css"] {
     border: 1px solid rgba(255,255,255,0.06);
     transition: all 0.3s cubic-bezier(0.25, 0.46, 0.45, 0.94);
     position: relative;
+    display: flex;
+    gap: 1.4rem;
+    align-items: flex-start;
 }
 .news-card:hover {
     transform: translateY(-3px);
     border-color: rgba(0, 200, 83, 0.3);
     box-shadow: 0 8px 24px rgba(0, 200, 83, 0.08);
+}
+.news-card-thumb {
+    flex-shrink: 0;
+    width: 160px;
+    height: 110px;
+    border-radius: 8px;
+    overflow: hidden;
+    background: #12161f;
+}
+.news-card-thumb img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+}
+.news-card-body {
+    flex: 1;
+    min-width: 0;
 }
 .news-card-title {
     font-size: 1.15rem;
@@ -156,6 +178,15 @@ html, body, [class*="css"] {
 .read-more:hover {
     color: #00E676;
 }
+@media (max-width: 600px) {
+    .news-card {
+        flex-direction: column;
+    }
+    .news-card-thumb {
+        width: 100%;
+        height: 180px;
+    }
+}
 
 /* Stats bar */
 .stats-bar {
@@ -206,6 +237,50 @@ RSS_FEEDS = {
 
 
 # ─── Fetch & Parse Feeds ────────────────────────────────────────────────────────
+def _extract_image(entry):
+    """Extract the best available image URL from an RSS entry."""
+    # 1. media_content (common in many RSS feeds)
+    if hasattr(entry, "media_content"):
+        for media in entry.media_content:
+            if media.get("medium") == "image" or media.get("type", "").startswith("image"):
+                return media.get("url", "")
+            # Some feeds just have url without type
+            url = media.get("url", "")
+            if url:
+                return url
+
+    # 2. media_thumbnail
+    if hasattr(entry, "media_thumbnail"):
+        for thumb in entry.media_thumbnail:
+            if thumb.get("url"):
+                return thumb["url"]
+
+    # 3. enclosures
+    if hasattr(entry, "enclosures") and entry.enclosures:
+        for enc in entry.enclosures:
+            if enc.get("type", "").startswith("image"):
+                return enc.get("href", "") or enc.get("url", "")
+
+    # 4. links with type image
+    if hasattr(entry, "links"):
+        for link in entry.links:
+            if link.get("type", "").startswith("image"):
+                return link.get("href", "")
+
+    # 5. Extract <img> src from summary / content HTML
+    html_content = ""
+    if hasattr(entry, "summary"):
+        html_content = entry.summary
+    if hasattr(entry, "content"):
+        for c in entry.content:
+            html_content += c.get("value", "")
+    img_match = re.search(r'<img[^>]+src=["\']([^"\']+)["\']', html_content)
+    if img_match:
+        return img_match.group(1)
+
+    return ""
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_cricket_news():
     """Fetch and merge cricket news from multiple RSS feeds."""
@@ -227,10 +302,12 @@ def fetch_cricket_news():
                 if hasattr(entry, "summary"):
                     summary = entry.summary
                     # Strip HTML tags from summary
-                    import re
                     summary = re.sub(r"<[^>]+>", "", summary).strip()
                     if len(summary) > 250:
                         summary = summary[:250] + "…"
+
+                # Extract image
+                image_url = _extract_image(entry)
 
                 articles.append({
                     "title": entry.get("title", "No Title"),
@@ -238,6 +315,7 @@ def fetch_cricket_news():
                     "source": source_name,
                     "published": published,
                     "summary": summary,
+                    "image": image_url,
                 })
         except Exception:
             # Silently skip feeds that fail
@@ -341,19 +419,32 @@ else:
         if article["summary"]:
             summary_html = f'<p class="news-card-summary">{article["summary"]}</p>'
 
-        st.markdown(f"""
-        <div class="news-card">
-            <div class="news-card-title">
-                <a href="{article['link']}" target="_blank" rel="noopener noreferrer">{article['title']}</a>
-            </div>
-            <div class="news-card-meta">
-                <span class="source-badge">{article['source']}</span>
-                {time_html}
-            </div>
-            {summary_html}
-            <a class="read-more" href="{article['link']}" target="_blank" rel="noopener noreferrer">Read full article →</a>
-        </div>
-        """, unsafe_allow_html=True)
+        # Build thumbnail HTML
+        thumb_html = ""
+        if article.get("image"):
+            thumb_html = (
+                f'<div class="news-card-thumb">'
+                f'<img src="{article["image"]}" alt="" loading="lazy" onerror="this.parentElement.style.display=\'none\'">'
+                f'</div>'
+            )
+
+        card_html = (
+            f'<div class="news-card">'
+            f'{thumb_html}'
+            f'<div class="news-card-body">'
+            f'<div class="news-card-title">'
+            f'<a href="{article["link"]}" target="_blank" rel="noopener noreferrer">{article["title"]}</a>'
+            f'</div>'
+            f'<div class="news-card-meta">'
+            f'<span class="source-badge">{article["source"]}</span>'
+            f'{time_html}'
+            f'</div>'
+            f'{summary_html}'
+            f'<a class="read-more" href="{article["link"]}" target="_blank" rel="noopener noreferrer">Read full article →</a>'
+            f'</div>'
+            f'</div>'
+        )
+        st.markdown(card_html, unsafe_allow_html=True)
 
 
 # ─── Footer ─────────────────────────────────────────────────────────────────────
