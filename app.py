@@ -2,6 +2,7 @@ import re
 import streamlit as st
 import feedparser
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from streamlit_autorefresh import st_autorefresh
 
 # ─── Page Config ────────────────────────────────────────────────────────────────
@@ -178,6 +179,28 @@ html, body, [class*="css"] {
 .read-more:hover {
     color: #00E676;
 }
+.priority-badge {
+    display: inline-block;
+    background: rgba(255, 215, 0, 0.15);
+    color: #FFD700;
+    padding: 0.15rem 0.55rem;
+    border-radius: 6px;
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.3px;
+    animation: glow 2s ease-in-out infinite;
+}
+@keyframes glow {
+    0%, 100% { box-shadow: 0 0 4px rgba(255,215,0,0.15); }
+    50% { box-shadow: 0 0 10px rgba(255,215,0,0.3); }
+}
+.news-card.priority {
+    border-color: rgba(255, 215, 0, 0.2);
+}
+.news-card.priority:hover {
+    border-color: rgba(255, 215, 0, 0.4);
+    box-shadow: 0 8px 24px rgba(255, 215, 0, 0.1);
+}
 @media (max-width: 600px) {
     .news-card {
         flex-direction: column;
@@ -230,10 +253,28 @@ html, body, [class*="css"] {
 
 # ─── RSS Feed Sources ───────────────────────────────────────────────────────────
 RSS_FEEDS = {
+    # English sources
     "ESPN Cricinfo": "https://www.espncricinfo.com/rss/content/story/feeds/0.xml",
     "Google News - Cricket": "https://news.google.com/rss/search?q=cricket&hl=en-IN&gl=IN&ceid=IN:en",
     "ICC Cricket": "https://www.icc-cricket.com/rss/feed",
+    "CricBuzz": "https://www.cricbuzz.com/cb-rss/cb-top",
+    "NDTV Sports - Cricket": "https://feeds.feedburner.com/ndtvsports-cricket",
+    "Cricket Australia": "https://www.cricket.com.au/rss",
+    # Malayalam sources
+    "Manorama - Cricket": "https://news.google.com/rss/search?q=cricket+site:manoramaonline.com&hl=ml&gl=IN&ceid=IN:ml",
+    "Mathrubhumi - Cricket": "https://news.google.com/rss/search?q=cricket+site:mathrubhumi.com&hl=ml&gl=IN&ceid=IN:ml",
+    "Asianet News - Cricket": "https://news.google.com/rss/search?q=cricket+site:asianetnews.com&hl=ml&gl=IN&ceid=IN:ml",
+    "Google News - Cricket ML": "https://news.google.com/rss/search?q=ക്രിക്കറ്റ്&hl=ml&gl=IN&ceid=IN:ml",
 }
+
+# ─── Priority keywords (articles matching these float to the top) ────────────
+PRIORITY_KEYWORDS = [
+    "sanju samson", "samson",
+    "indian cricket", "india cricket", "team india",
+    "bcci", "indian team", "india vs", "ind vs",
+    "rohit sharma", "virat kohli",
+    "സഞ്ജു സാംസൺ", "ഇന്ത്യൻ ക്രിക്കറ്റ്",
+]
 
 
 # ─── Fetch & Parse Feeds ────────────────────────────────────────────────────────
@@ -281,6 +322,29 @@ def _extract_image(entry):
     return ""
 
 
+def _parse_pub_date(published_str):
+    """Parse an RSS published date string to a UTC datetime, or None."""
+    if not published_str:
+        return None
+    try:
+        return parsedate_to_datetime(published_str)
+    except Exception:
+        pass
+    # Try ISO format as fallback
+    for fmt in ("%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return datetime.strptime(published_str, fmt)
+        except Exception:
+            continue
+    return None
+
+
+def _is_priority(title, summary):
+    """Check if an article matches priority keywords."""
+    text = (title + " " + summary).lower()
+    return any(kw in text for kw in PRIORITY_KEYWORDS)
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_cricket_news():
     """Fetch and merge cricket news from multiple RSS feeds."""
@@ -297,6 +361,9 @@ def fetch_cricket_news():
                 elif hasattr(entry, "updated"):
                     published = entry.updated
 
+                # Parse to datetime for sorting
+                pub_dt = _parse_pub_date(published)
+
                 # Extract summary
                 summary = ""
                 if hasattr(entry, "summary"):
@@ -309,33 +376,45 @@ def fetch_cricket_news():
                 # Extract image
                 image_url = _extract_image(entry)
 
+                title = entry.get("title", "No Title")
+                priority = _is_priority(title, summary)
+
                 articles.append({
-                    "title": entry.get("title", "No Title"),
+                    "title": title,
                     "link": entry.get("link", "#"),
                     "source": source_name,
                     "published": published,
+                    "pub_dt": pub_dt,
                     "summary": summary,
                     "image": image_url,
+                    "priority": priority,
                 })
         except Exception:
             # Silently skip feeds that fail
             continue
 
+    # Sort: priority articles first, then by date (latest first)
+    epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+    articles.sort(
+        key=lambda a: (
+            0 if a["priority"] else 1,          # priority first
+            -(a["pub_dt"] or epoch).timestamp()  # then latest first
+        )
+    )
+
     return articles
 
 
-def format_time_ago(published_str):
-    """Try to convert published string to a relative 'time ago' format."""
-    if not published_str:
+def format_time_ago(pub_dt):
+    """Convert a datetime to a relative 'time ago' string."""
+    if not pub_dt:
         return ""
     try:
-        from email.utils import parsedate_to_datetime
-        pub_dt = parsedate_to_datetime(published_str)
         now = datetime.now(timezone.utc)
         diff = now - pub_dt
         seconds = int(diff.total_seconds())
         if seconds < 0:
-            return published_str
+            return ""
         if seconds < 60:
             return "just now"
         elif seconds < 3600:
@@ -348,7 +427,7 @@ def format_time_ago(published_str):
             d = seconds // 86400
             return f"{d}d ago"
     except Exception:
-        return published_str
+        return ""
 
 
 # ─── Header ─────────────────────────────────────────────────────────────────────
@@ -412,7 +491,7 @@ if not filtered:
     st.info("No articles match your filters. Try adjusting your selection.")
 else:
     for article in filtered:
-        time_ago = format_time_ago(article["published"])
+        time_ago = format_time_ago(article.get("pub_dt"))
         time_html = f'<span class="meta-item">🕒 {time_ago}</span>' if time_ago else ""
 
         summary_html = ""
@@ -428,8 +507,15 @@ else:
                 f'</div>'
             )
 
+        # Priority badge
+        priority_html = ""
+        card_class = "news-card"
+        if article.get("priority"):
+            priority_html = '<span class="priority-badge">⭐ PRIORITY</span>'
+            card_class = "news-card priority"
+
         card_html = (
-            f'<div class="news-card">'
+            f'<div class="{card_class}">'
             f'{thumb_html}'
             f'<div class="news-card-body">'
             f'<div class="news-card-title">'
@@ -437,6 +523,7 @@ else:
             f'</div>'
             f'<div class="news-card-meta">'
             f'<span class="source-badge">{article["source"]}</span>'
+            f'{priority_html}'
             f'{time_html}'
             f'</div>'
             f'{summary_html}'
